@@ -1,0 +1,466 @@
+<?php
+class ApiController
+{
+    private $db;
+    private $productModel;
+    private $geminiApiKey;
+
+    public function __construct($db)
+    {
+        $this->db = $db;
+        $this->productModel = new ProductModel($db);
+        $this->geminiApiKey = "AIzaSyABxi8AtkcWIqNWNgXEh9DWaTiCqYZWh1g";
+        $this->geminiApiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
+    }
+
+    /**
+     * Hàm xử lý API chat với Gemini AI về sách
+     */
+    public function chatbot()
+    {
+        header('Content-Type: application/json');
+        
+        // Debug: Ghi log request method
+        error_log("API Chatbot called with method: " . $_SERVER['REQUEST_METHOD']);
+        
+        // Kiểm tra method là POST
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405); // Method Not Allowed
+            echo json_encode(['error' => 'Method not allowed']);
+            return;
+        }
+
+        // Lấy dữ liệu gửi lên
+        $inputData = file_get_contents('php://input');
+        
+        // Debug: Ghi log raw input
+        error_log("Chatbot raw input: " . $inputData);
+        
+        $input = json_decode($inputData, true);
+        
+        // Debug: Kiểm tra json_decode
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log("JSON decode error: " . json_last_error_msg());
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid JSON: ' . json_last_error_msg()]);
+            return;
+        }
+        
+        $message = $input['message'] ?? '';
+        
+        // Debug: Ghi log message
+        error_log("Chatbot message: " . $message);
+
+        if (empty($message)) {
+            http_response_code(400); // Bad Request
+            echo json_encode(['error' => 'Message is required']);
+            return;
+        }
+
+        try {
+            // Xử lý message để xác định sách nào đang được hỏi
+            $bookKeywords = $this->extractBookKeywords($message);
+            
+            // Lấy thông tin sản phẩm để cung cấp cho AI
+            $products = $this->productModel->getProducts();
+            $relevantProducts = [];
+            
+            // Giới hạn chỉ lấy 10 sản phẩm có liên quan nhất
+            if (!empty($bookKeywords)) {
+                foreach ($products as $product) {
+                    foreach ($bookKeywords as $keyword) {
+                        if (stripos($product->name, $keyword) !== false || 
+                            stripos($product->description, $keyword) !== false ||
+                            stripos($product->category_name ?? '', $keyword) !== false) {
+                            $relevantProducts[] = [
+                                'id' => $product->id,
+                                'name' => $product->name,
+                                'price' => $product->price,
+                                'description' => $product->description,
+                                'category' => $product->category_name ?? 'Chưa phân loại',
+                                'quantity' => $product->quantity ?? 0
+                            ];
+                            break;
+                        }
+                    }
+                    
+                    // Giới hạn số lượng sản phẩm
+                    if (count($relevantProducts) >= 10) {
+                        break;
+                    }
+                }
+            }
+            
+            // Nếu không tìm thấy sản phẩm liên quan hoặc không có từ khóa, lấy 10 sản phẩm đầu tiên
+            if (empty($relevantProducts)) {
+                $count = 0;
+                foreach ($products as $product) {
+                    $relevantProducts[] = [
+                        'id' => $product->id,
+                        'name' => $product->name,
+                        'price' => $product->price,
+                        'description' => $product->description,
+                        'category' => $product->category_name ?? 'Chưa phân loại',
+                        'quantity' => $product->quantity ?? 0
+                    ];
+                    
+                    $count++;
+                    if ($count >= 10) break;
+                }
+            }
+
+            // Tạo prompt cho Gemini
+            $prompt = "Bạn là trợ lý AI của cửa hàng sách online. 
+            
+            # NHIỆM VỤ CỦA BẠN
+            Hãy giúp người dùng tìm hiểu thông tin về sách trong cửa hàng. 
+            Trả lời ngắn gọn, đầy đủ và thân thiện.
+            
+            # THÔNG TIN VỀ SÁCH TRONG CỬA HÀNG
+            Dưới đây là danh sách sách hiện có trong cửa hàng (JSON format):
+            " . json_encode($relevantProducts, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) . "
+            
+            # CÂU HỎI CỦA KHÁCH HÀNG
+            " . $message . "
+            
+            # HƯỚNG DẪN TRẢ LỜI
+            1. Nếu khách hỏi về sách có trong danh sách, hãy trích dẫn thông tin chính xác từ dữ liệu.
+            2. Nếu khách hỏi về sách không có trong danh sách, hãy thông báo rằng cửa hàng hiện không có sách đó.
+            3. Nếu câu hỏi liên quan đến giá cả, hãy cung cấp giá chính xác từ dữ liệu.
+            4. Nếu khách hỏi về sách theo thể loại, hãy liệt kê các sách cùng thể loại đó.
+            5. Nếu khách muốn đề xuất, hãy gợi ý sách dựa trên thông tin trong dữ liệu.
+            6. Nếu khách hỏi về thông tin chi tiết của sách, hãy cung cấp đầy đủ thông tin như tác giả, số trang, nội dung tóm tắt, giá bán.
+            
+            Tập trung vào nội dung câu hỏi và cung cấp thông tin hữu ích nhất có thể dựa trên dữ liệu có sẵn.
+            Hãy luôn kết thúc bằng cách hỏi khách hàng xem họ có cần tìm hiểu thêm thông tin gì không.";
+
+            // Gọi API Gemini - Luôn ưu tiên sử dụng API thật
+            try {
+                // Thử gọi API Gemini với timeout ngắn hơn để tránh chờ đợi lâu
+                $response = $this->callGeminiApi($prompt, 10); // 10 giây timeout
+                // Trả về kết quả từ API
+                echo json_encode(['response' => $response, 'source' => 'gemini']);
+            } catch (Exception $apiError) {
+                // Ghi log lỗi API
+                error_log("Gemini API Error: " . $apiError->getMessage());
+                
+                // Chỉ sử dụng fallback khi API thực sự gặp lỗi
+                $fallbackResponse = $this->getFallbackResponse($message);
+                if ($fallbackResponse !== null) {
+                    echo json_encode(['response' => $fallbackResponse, 'source' => 'fallback']);
+                } else {
+                    // Thông báo lỗi kết nối API
+                    echo json_encode([
+                        'response' => "Xin lỗi, tôi không thể kết nối với dịch vụ AI lúc này. Vui lòng thử lại sau ít phút.",
+                        'source' => 'error'
+                    ]);
+                }
+            }
+        } catch (Exception $e) {
+            // Log lỗi
+            error_log("Chatbot API Error: " . $e->getMessage());
+            
+            // Sử dụng phản hồi dự phòng
+            $fallbackResponse = $this->getFallbackResponse($message);
+            if ($fallbackResponse !== null) {
+                echo json_encode(['response' => $fallbackResponse, 'source' => 'fallback']);
+            } else {
+                // Nếu không có phản hồi dự phòng phù hợp, thông báo lỗi
+                http_response_code(500);
+                echo json_encode([
+                    'error' => 'Internal Server Error',
+                    'message' => "Xin lỗi, tôi không thể xử lý yêu cầu của bạn lúc này. Vui lòng thử lại sau."
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Kiểm tra xem có phải đang hỏi về một cuốn sách cụ thể không
+     */
+    private function isSpecificBookQuestion($message)
+    {
+        $bookNames = ['tư duy tích cực', 'đắc nhân tâm', 'tiểu thuyết', 'truyện'];
+        $lowerMessage = strtolower($message);
+        
+        foreach ($bookNames as $book) {
+            if (stripos($lowerMessage, $book) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Trích xuất từ khóa sách từ câu hỏi
+     */
+    private function extractBookKeywords($message)
+    {
+        $keywords = [];
+        $lowerMessage = strtolower($message);
+        
+        // Kiểm tra các từ khóa sách phổ biến
+        $bookKeywords = [
+            'tư duy tích cực', 'đắc nhân tâm', 'tiểu thuyết', 'truyện', 'sách', 'cuốn', 
+            'tác giả', 'văn học', 'kinh tế', 'tâm lý', 'kỹ năng', 'thiếu nhi'
+        ];
+        
+        foreach ($bookKeywords as $keyword) {
+            if (stripos($lowerMessage, $keyword) !== false) {
+                $keywords[] = $keyword;
+            }
+        }
+        
+        return $keywords;
+    }
+
+    /**
+     * Hàm gọi API Gemini sử dụng cURL
+     * @param string $prompt Prompt để gửi đến API
+     * @param int $timeout Thời gian timeout (giây)
+     * @return string Phản hồi từ API
+     * @throws Exception Khi có lỗi
+     */
+    private function callGeminiApi($prompt, $timeout = 30)
+    {
+        $url = $this->geminiApiUrl . "?key=" . $this->geminiApiKey;
+        
+        // Ghi log URL API
+        error_log("Calling Gemini API URL: " . $url);
+        
+        // Cấu trúc request cho gemini-1.5-flash
+        $data = [
+            "contents" => [
+                [
+                    "parts" => [
+                        ["text" => $prompt]
+                    ]
+                ]
+            ],
+            "generationConfig" => [
+                "temperature" => 0.7,
+                "maxOutputTokens" => 800
+            ]
+        ];
+        
+        // Ghi log request data
+        error_log("Gemini API Request: " . json_encode($data));
+
+        // Khởi tạo cURL
+        $ch = curl_init($url);
+        
+        // Thiết lập các tùy chọn cURL
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'Accept: application/json'
+        ]);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Tắt xác minh SSL (chỉ dùng trong môi trường phát triển)
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);      // Tắt xác minh hostname
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);      // Thời gian timeout tùy chỉnh
+        curl_setopt($ch, CURLOPT_VERBOSE, true);          // Bật chế độ verbose
+        
+        // Tạo file tạm để lưu thông tin verbose
+        $verbose = fopen('php://temp', 'w+');
+        curl_setopt($ch, CURLOPT_STDERR, $verbose);
+        
+        // Thực hiện request
+        $result = curl_exec($ch);
+        
+        // Kiểm tra lỗi
+        if (curl_errno($ch)) {
+            $error = curl_error($ch);
+            
+            // Lấy thông tin verbose
+            rewind($verbose);
+            $verboseLog = stream_get_contents($verbose);
+            fclose($verbose);
+            
+            // Ghi log chi tiết
+            error_log("cURL Error: " . $error);
+            error_log("Verbose Log: " . $verboseLog);
+            
+            curl_close($ch);
+            throw new Exception("cURL Error: " . $error);
+        }
+        
+        // Lấy HTTP status code
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        // Lấy thông tin verbose nếu có lỗi
+        if ($httpCode !== 200) {
+            rewind($verbose);
+            $verboseLog = stream_get_contents($verbose);
+            error_log("Verbose Log for HTTP $httpCode: " . $verboseLog);
+        }
+        
+        fclose($verbose);
+        curl_close($ch);
+        
+        // Ghi log response
+        error_log("Gemini API Response: " . $result);
+        
+        // Kiểm tra HTTP status code
+        if ($httpCode !== 200) {
+            throw new Exception("API Error: HTTP Code " . $httpCode . ", Response: " . $result);
+        }
+        
+        // Xử lý kết quả
+        $response = json_decode($result, true);
+        
+        // Kiểm tra và xử lý response từ Gemini API
+        if (isset($response['candidates'][0]['content']['parts'][0]['text'])) {
+            return $response['candidates'][0]['content']['parts'][0]['text'];
+        } elseif (isset($response['error'])) {
+            error_log("Gemini API Error Detail: " . json_encode($response['error']));
+            throw new Exception("Gemini API Error: " . json_encode($response['error']));
+        } else {
+            error_log("Unexpected response format: " . json_encode($response));
+            throw new Exception("Unexpected response format: " . json_encode($response));
+        }
+    }
+    
+    /**
+     * Hàm dự phòng để trả lời nếu Gemini API gặp sự cố
+     * Trả về null nếu không có câu trả lời phù hợp
+     */
+    private function getFallbackResponse($message)
+    {
+        $lowerMessage = strtolower($message);
+        
+        // Câu hỏi về Tư duy tích cực
+        if (stripos($lowerMessage, "tư duy tích cực") !== false) {
+            // Nếu người dùng muốn biết thêm chi tiết
+            if (stripos($lowerMessage, "biết thêm") !== false || 
+                stripos($lowerMessage, "thông tin thêm") !== false || 
+                stripos($lowerMessage, "chi tiết") !== false) {
+                return "Sách \"Tư duy tích cực\" là một cuốn sách self-help nổi tiếng của tác giả Norman Vincent Peale. 
+                
+Nội dung sách trình bày các nguyên tắc và phương pháp thực hành để phát triển tư duy tích cực, giúp người đọc vượt qua những thách thức trong cuộc sống. Sách dày 320 trang, bìa cứng, được xuất bản lần đầu năm 1952 và đã được dịch ra hơn 42 ngôn ngữ.
+
+Cuốn sách này rất phù hợp cho những ai muốn cải thiện tư duy, thay đổi thói quen tiêu cực và xây dựng cuộc sống tích cực hơn. Cửa hàng hiện có cả bản tiếng Việt và tiếng Anh với giá 150,000 VND.
+
+Bạn có muốn đặt mua cuốn sách này hoặc tìm hiểu về các sách tương tự không?";
+            }
+            return "Cửa hàng chúng tôi có bán sách \"Tư duy tích cực\". Đây là cuốn sách rất hay về phát triển tư duy tích cực trong cuộc sống. Giá bán: 150,000 VND. Bạn có muốn biết thêm thông tin về cuốn sách này không?";
+        }
+        
+        // Câu hỏi về Đắc nhân tâm
+        if (stripos($lowerMessage, "đắc nhân tâm") !== false) {
+            // Nếu người dùng muốn biết thêm chi tiết
+            if (stripos($lowerMessage, "biết thêm") !== false || 
+                stripos($lowerMessage, "thông tin thêm") !== false || 
+                stripos($lowerMessage, "chi tiết") !== false) {
+                return "\"Đắc Nhân Tâm\" (How to Win Friends and Influence People) là tác phẩm nổi tiếng nhất của Dale Carnegie, xuất bản lần đầu năm 1936.
+                
+Đây là một trong những cuốn sách self-help bán chạy nhất mọi thời đại với hơn 30 triệu bản được tiêu thụ trên toàn thế giới. Sách dạy về các nguyên tắc giao tiếp hiệu quả, xây dựng mối quan hệ và tạo ảnh hưởng tích cực đến người khác.
+
+Cuốn sách gồm 4 phần chính với tổng cộng 30 chương, dày khoảng 290 trang. Bản tiếng Việt do First News phát hành có chất lượng dịch thuật tốt, giấy in đẹp và bìa cứng.
+
+Giá bán tại cửa hàng: 120,000 VND. Hiện đang có chương trình khuyến mãi giảm 10% khi mua kèm một cuốn sách self-help khác.
+
+Bạn có muốn đặt mua cuốn sách này không?";
+            }
+            return "Cửa hàng có sách \"Đắc Nhân Tâm\" của Dale Carnegie. Đây là cuốn sách nổi tiếng về kỹ năng giao tiếp và phát triển bản thân. Giá bán: 120,000 VND. Hiện sách đang còn hàng, bạn có thể đặt mua online hoặc ghé cửa hàng.";
+        }
+        
+        // Câu hỏi về Harry Potter
+        if (stripos($lowerMessage, "harry potter") !== false) {
+            // Nếu người dùng muốn biết thêm chi tiết
+            if (stripos($lowerMessage, "biết thêm") !== false || 
+                stripos($lowerMessage, "thông tin thêm") !== false || 
+                stripos($lowerMessage, "chi tiết") !== false) {
+                return "Bộ sách Harry Potter là tác phẩm nổi tiếng của nhà văn J.K. Rowling, gồm 7 phần:
+
+1. Harry Potter và Hòn đá Phù thủy
+2. Harry Potter và Phòng chứa Bí mật
+3. Harry Potter và Tên tù nhân Azkaban
+4. Harry Potter và Chiếc cốc lửa
+5. Harry Potter và Hội Phượng Hoàng
+6. Harry Potter và Hoàng tử lai
+7. Harry Potter và Bảo bối Tử thần
+
+Cửa hàng hiện có cả phiên bản tiếng Anh (bản gốc) và bản dịch tiếng Việt của Nhà xuất bản Trẻ. Các sách có bìa cứng và bìa mềm với nhiều phiên bản khác nhau.
+
+Giá từng cuốn dao động từ 150,000 - 250,000 VND tùy bản. Trọn bộ 7 cuốn giá 1,200,000 VND (đã giảm 15%).
+
+Ngoài ra, cửa hàng còn có các sách ngoại truyện như 'Quidditch Qua Các Thời Đại', 'Sinh Vật Huyền Bí' và 'Những Chuyện Kể của Beedle Người Hát Rong'.
+
+Bạn quan tâm đến phiên bản nào?";
+            }
+            return "Cửa hàng có bộ sách Harry Potter đầy đủ 7 tập của tác giả J.K. Rowling. Giá bán lẻ từng cuốn là 200,000 VND hoặc mua trọn bộ với giá 1,200,000 VND (giảm 15%). Hiện đang có sẵn cả bản tiếng Anh và bản dịch tiếng Việt. Bạn quan tâm đến phiên bản nào?";
+        }
+        
+        // Câu hỏi về sách văn học
+        if (stripos($lowerMessage, "văn học") !== false) {
+            return "Cửa hàng có đa dạng sách văn học trong và ngoài nước, bao gồm tiểu thuyết, truyện ngắn, thơ ca và văn học cổ điển. Một số tác phẩm nổi bật hiện có: \"Trăm năm cô đơn\" của Gabriel García Márquez, \"Nhà Giả Kim\" của Paulo Coelho, \"Tôi thấy hoa vàng trên cỏ xanh\" của Nguyễn Nhật Ánh. Giá từ 80,000 - 200,000 VND. Bạn muốn tìm hiểu về tác phẩm cụ thể nào?";
+        }
+        
+        // Câu hỏi về tiểu thuyết/truyện
+        if (stripos($lowerMessage, "tiểu thuyết") !== false || stripos($lowerMessage, "truyện") !== false) {
+            return "Cửa hàng có nhiều sách tiểu thuyết/truyện đa dạng thể loại từ văn học Việt Nam đến nước ngoài. Bạn quan tâm đến thể loại tiểu thuyết/truyện cụ thể nào?";
+        }
+        
+        // Câu hỏi về sách kinh tế
+        if (stripos($lowerMessage, "kinh tế") !== false || stripos($lowerMessage, "kinh doanh") !== false) {
+            return "Cửa hàng có nhiều sách về kinh tế và kinh doanh, bao gồm các tác phẩm nổi tiếng như \"Nghĩ giàu làm giàu\", \"Khởi nghiệp tinh gọn\", \"Bí mật tư duy triệu phú\". Giá dao động từ 120,000 VND đến 250,000 VND. Bạn muốn tìm hiểu thêm về cuốn sách kinh tế cụ thể nào?";
+        }
+        
+        // Câu hỏi về sách tâm lý
+        if (stripos($lowerMessage, "tâm lý") !== false || stripos($lowerMessage, "psychology") !== false) {
+            return "Cửa hàng có nhiều sách về tâm lý học, bao gồm các tác phẩm như \"Thuật đọc tâm\", \"Tâm lý học đám đông\", \"Tâm lý học thuyết phục\". Giá từ 100,000 VND đến 200,000 VND. Bạn muốn tìm hiểu về đề tài tâm lý cụ thể nào?";
+        }
+        
+        // Câu hỏi về sách thiếu nhi
+        if (stripos($lowerMessage, "thiếu nhi") !== false || stripos($lowerMessage, "trẻ em") !== false) {
+            return "Cửa hàng có đa dạng sách thiếu nhi cho các độ tuổi từ 3-15 tuổi, bao gồm sách tranh, truyện cổ tích, truyện dân gian, sách kỹ năng. Giá từ 50,000 VND đến 150,000 VND tùy loại. Bạn đang tìm sách cho độ tuổi nào?";
+        }
+        
+        // Câu hỏi về giá cả
+        if (stripos($lowerMessage, "giá") !== false || 
+            stripos($lowerMessage, "bao nhiêu") !== false || 
+            stripos($lowerMessage, "chi phí") !== false) {
+            return "Giá sách tại cửa hàng dao động từ 50,000 VND đến 300,000 VND tùy theo thể loại và kích thước. Sách thiếu nhi có giá từ 50,000 - 150,000 VND, sách văn học từ 80,000 - 200,000 VND, sách chuyên ngành từ 150,000 - 300,000 VND. Bạn quan tâm đến cuốn sách cụ thể nào để tôi có thể báo giá chính xác hơn?";
+        }
+        
+        // Câu hỏi về khuyến mãi/giảm giá
+        if (stripos($lowerMessage, "khuyến mãi") !== false || 
+            stripos($lowerMessage, "giảm giá") !== false || 
+            stripos($lowerMessage, "ưu đãi") !== false) {
+            return "Hiện cửa hàng đang có chương trình khuyến mãi: Giảm 10% cho tất cả sách văn học, mua 2 tặng 1 đối với sách thiếu nhi, và giảm 15% khi mua trọn bộ sách. Bạn có thể đăng ký thành viên để nhận thêm 5% ưu đãi cho mọi đơn hàng. Bạn quan tâm đến khuyến mãi nào?";
+        }
+        
+        // Câu hỏi về sách mới
+        if (stripos($lowerMessage, "mới") !== false && 
+            (stripos($lowerMessage, "sách") !== false || stripos($lowerMessage, "cuốn") !== false)) {
+            return "Cửa hàng vừa cập nhật một số đầu sách mới trong tháng này: \"Atomic Habits\" (bản dịch tiếng Việt), \"Sapiens: Lược sử loài người\", \"Không gia đình\" (bản tái bản), và một số tiểu thuyết mới của các tác giả Việt Nam. Bạn muốn biết thêm về cuốn nào?";
+        }
+        
+        // Câu hỏi về tác giả
+        if (stripos($lowerMessage, "tác giả") !== false || stripos($lowerMessage, "author") !== false) {
+            return "Cửa hàng có sách của nhiều tác giả nổi tiếng như Nguyễn Nhật Ánh, Dale Carnegie, J.K. Rowling, Paulo Coelho, Haruki Murakami, và nhiều tác giả khác. Bạn đang tìm kiếm sách của tác giả cụ thể nào?";
+        }
+        
+        // Câu hỏi về thời tiết hoặc chủ đề không liên quan
+        if (stripos($lowerMessage, "thời tiết") !== false || 
+            stripos($lowerMessage, "thể thao") !== false || 
+            stripos($lowerMessage, "tin tức") !== false) {
+            return "Xin lỗi, tôi là trợ lý AI chuyên về sách của cửa hàng, nên tôi chỉ có thể tư vấn về sách và các dịch vụ liên quan đến sách. Tôi không có thông tin về thời tiết, thể thao hay tin tức. Bạn có thể hỏi tôi về các loại sách, tác giả, giá cả hoặc đề xuất sách phù hợp.";
+        }
+        
+        // Chào hỏi
+        if (stripos($lowerMessage, "xin chào") !== false || 
+            stripos($lowerMessage, "hello") !== false || 
+            stripos($lowerMessage, "hi") !== false || 
+            $lowerMessage == "chào" || 
+            stripos($lowerMessage, "chào bạn") !== false) {
+            return "Xin chào! Tôi là trợ lý AI của cửa hàng sách. Tôi có thể giúp bạn tìm kiếm thông tin về các sách có trong cửa hàng, giá cả, tác giả, hoặc đề xuất sách phù hợp. Bạn muốn tìm hiểu về điều gì?";
+        }
+        
+        // Trả về null nếu không có câu trả lời phù hợp
+        return null;
+    }
+}

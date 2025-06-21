@@ -1,0 +1,62 @@
+/* Admin CSS - Section Headers Styling */
+
+/* Card headers with light background - for section headers like "Thông tin sản phẩm", "Kho hàng", etc. */
+.card .card-header.bg-light,
+.card-header.bg-light {
+    background-color: #e9ecef !important;
+    color: #1a2a44;
+    border-bottom: 2px solid #1a2a44;
+    font-weight: bold;
+}
+
+/* Make sure the headers have proper spacing */
+.card .card-header h5,
+.card-header h5 {
+    margin-bottom: 0;
+}
+
+/* Style the icons in the headers */
+.card .card h5.mb-0 i,
+.card h5.mb-0 i {
+    color: #00ccaa;
+}
+
+/* Additional styling for card headers that might not have bg-light class */
+.card .card-header:not(.bg-gradient-primary-to-secondary):not(.bg-primary):not(.bg-secondary):not(.bg-success):not(.bg-danger):not(.bg-warning):not(.bg-info):not(.bg-dark) {
+    background-color: #e9ecef !important;
+    color: #1a2a44;
+    border-bottom: 2px solid #1a2a44;
+}
+
+/* Style for cards inside other cards to ensure proper nesting */
+.card .card {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075) !important;
+    margin-bottom: 1rem;
+}
+
+/* Ensure section headers stand out */
+.card-header h5 i {
+    margin-right: 0.5rem;
+}
+
+/* Edit page header styling */
+.card-header.bg-gradient,
+.card-header.bg-gradient-primary-to-secondary {
+    background: linear-gradient(135deg, #1a2a44 0%, #293e63 100%) !important;
+    color: white;
+    padding: 1rem;
+    border-bottom: none;
+}
+
+/* Edit page header title */
+.card-header h2,
+.card-header h3,
+.card-header h4 {
+    font-weight: bold;
+    margin-bottom: 0;
+}
+
+/* Edit page card header with background color */
+.bg-gradient-primary-to-secondary {
+    background: linear-gradient(135deg, #1a2a44 0%, #293e63 100%) !important;
+} 

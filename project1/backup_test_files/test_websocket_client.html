@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Test</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+    <style>
+        .card {
+            margin-bottom: 15px;
+        }
+        .notification {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+        #notifications {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1>WebSocket Test</h1>
+        
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        Connection Status
+                    </div>
+                    <div class="card-body">
+                        <p>Status: <span id="status" class="badge bg-secondary">Disconnected</span></p>
+                        <button id="connectBtn" class="btn btn-primary">Connect</button>
+                        <button id="disconnectBtn" class="btn btn-danger" disabled>Disconnect</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        Send Message
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="messageType" class="form-label">Message Type</label>
+                            <select id="messageType" class="form-select">
+                                <option value="register">Register</option>
+                                <option value="new_product">New Product</option>
+                                <option value="update_product">Update Product</option>
+                                <option value="delete_product">Delete Product</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="messageData" class="form-label">Message Data (JSON)</label>
+                            <textarea id="messageData" class="form-control" rows="5">{"role": "user"}</textarea>
+                        </div>
+                        <button id="sendBtn" class="btn btn-success" disabled>Send</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        Notifications
+                    </div>
+                    <div class="card-body">
+                        <div id="notifications"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
+    <script>
+        // DOM Elements
+        const statusEl = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const messageTypeEl = document.getElementById('messageType');
+        const messageDataEl = document.getElementById('messageData');
+        const sendBtn = document.getElementById('sendBtn');
+        const notificationsEl = document.getElementById('notifications');
+        
+        // WebSocket
+        let socket = null;
+        
+        // Connect to WebSocket server
+        connectBtn.addEventListener('click', function() {
+            try {
+                socket = new WebSocket('ws://localhost:8090');
+                
+                socket.onopen = function() {
+                    console.log('WebSocket connected');
+                    statusEl.textContent = 'Connected';
+                    statusEl.className = 'badge bg-success';
+                    
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                    sendBtn.disabled = false;
+                    
+                    // Register as user
+                    const registerMsg = {
+                        type: 'register',
+                        role: 'user'
+                    };
+                    socket.send(JSON.stringify(registerMsg));
+                    addNotification('Registered as user');
+                };
+                
+                socket.onmessage = function(event) {
+                    console.log('Message received:', event.data);
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleMessage(data);
+                    } catch (error) {
+                        console.error('Error parsing message:', error);
+                        addNotification('Error parsing message: ' + error.message, 'danger');
+                    }
+                };
+                
+                socket.onclose = function() {
+                    console.log('WebSocket disconnected');
+                    statusEl.textContent = 'Disconnected';
+                    statusEl.className = 'badge bg-secondary';
+                    
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    sendBtn.disabled = true;
+                    
+                    addNotification('Disconnected from server', 'warning');
+                };
+                
+                socket.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                    addNotification('Connection error', 'danger');
+                };
+            } catch (error) {
+                console.error('Failed to connect:', error);
+                addNotification('Failed to connect: ' + error.message, 'danger');
+            }
+        });
+        
+        // Disconnect from WebSocket server
+        disconnectBtn.addEventListener('click', function() {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+        });
+        
+        // Send message
+        sendBtn.addEventListener('click', function() {
+            if (!socket) return;
+            
+            try {
+                const type = messageTypeEl.value;
+                let data = {};
+                
+                try {
+                    data = JSON.parse(messageDataEl.value);
+                } catch (error) {
+                    console.error('Invalid JSON:', error);
+                    addNotification('Invalid JSON: ' + error.message, 'danger');
+                    return;
+                }
+                
+                const message = {
+                    type: type,
+                    ...data
+                };
+                
+                socket.send(JSON.stringify(message));
+                addNotification('Message sent: ' + type, 'info');
+            } catch (error) {
+                console.error('Error sending message:', error);
+                addNotification('Error sending message: ' + error.message, 'danger');
+            }
+        });
+        
+        // Update message data based on selected type
+        messageTypeEl.addEventListener('change', function() {
+            const type = messageTypeEl.value;
+            let data = {};
+            
+            switch (type) {
+                case 'register':
+                    data = { role: 'user' };
+                    break;
+                case 'new_product':
+                    data = {
+                        product: {
+                            id: 999,
+                            name: 'Test Product',
+                            description: 'Test Description',
+                            price: 100000,
+                            category_id: 1,
+                            category_name: 'Test Category',
+                            image: 'uploads/book.jpg',
+                            quantity: 10
+                        }
+                    };
+                    break;
+                case 'update_product':
+                    data = {
+                        product: {
+                            id: 999,
+                            name: 'Updated Test Product',
+                            description: 'Updated Test Description',
+                            price: 150000,
+                            category_id: 1,
+                            category_name: 'Test Category',
+                            image: 'uploads/book.jpg',
+                            quantity: 15
+                        }
+                    };
+                    break;
+                case 'delete_product':
+                    data = { product_id: 999 };
+                    break;
+            }
+            
+            messageDataEl.value = JSON.stringify(data, null, 2);
+        });
+        
+        // Handle incoming messages
+        function handleMessage(data) {
+            if (!data || !data.type) return;
+            
+            let notificationText = '';
+            let notificationType = 'success';
+            
+            switch (data.type) {
+                case 'new_product':
+                    if (data.product) {
+                        notificationText = `New product added: ${data.product.name}`;
+                        showToast(notificationText, 'success');
+                    }
+                    break;
+                case 'update_product':
+                    if (data.product) {
+                        notificationText = `Product updated: ${data.product.name}`;
+                        showToast(notificationText, 'info');
+                    }
+                    break;
+                case 'delete_product':
+                    notificationText = `Product deleted: ID ${data.product_id}`;
+                    showToast(notificationText, 'warning');
+                    break;
+                default:
+                    notificationText = `Received message of type: ${data.type}`;
+                    notificationType = 'info';
+            }
+            
+            addNotification(notificationText, notificationType);
+        }
+        
+        // Add notification to the list
+        function addNotification(text, type = 'success') {
+            const notification = document.createElement('div');
+            notification.className = `notification alert alert-${type}`;
+            notification.textContent = text;
+            
+            notificationsEl.prepend(notification);
+            
+            // Limit number of notifications
+            if (notificationsEl.children.length > 20) {
+                notificationsEl.removeChild(notificationsEl.lastChild);
+            }
+        }
+        
+        // Show toast notification
+        function showToast(text, type = 'success') {
+            let bgColor = '#28a745'; // success
+            
+            if (type === 'info') bgColor = '#17a2b8';
+            else if (type === 'warning') bgColor = '#ffc107';
+            else if (type === 'danger') bgColor = '#dc3545';
+            
+            Toastify({
+                text: text,
+                duration: 5000,
+                gravity: "top",
+                position: "right",
+                backgroundColor: bgColor,
+                stopOnFocus: true,
+                close: true
+            }).showToast();
+        }
+    </script>
+</body>
+</html> 
